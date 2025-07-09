@@ -1,7 +1,57 @@
 # Launch Windows Sandbox with automatic DNS configuration and winget installation
 # This script creates a sandbox configuration file and launches it
 
-# Create the DNS configuration script content
+# Function to download winget dependencies
+function Download-WingetDependencies {
+    param(
+        [string]$DownloadPath
+    )
+    
+    Write-Host "Downloading winget dependencies to: $DownloadPath" -ForegroundColor Green
+    
+    # Create download directory if it doesn't exist
+    if (!(Test-Path $DownloadPath)) {
+        New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
+        Write-Host "Created download directory: $DownloadPath" -ForegroundColor Cyan
+    }
+    
+    # Download URLs (latest stable versions)
+    $vcLibsUrl = "https://aka.ms/Microsoft.VCLibs.arm64.14.00.Desktop.appx"
+    $uiXamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.arm64.appx"
+    $wingetUrl = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+    
+    # Download dependencies
+    Write-Host "Downloading Visual C++ Redistributable Libraries..." -ForegroundColor Cyan
+    try {
+        Invoke-WebRequest -Uri $vcLibsUrl -OutFile "$DownloadPath\VCLibs.appx" -UseBasicParsing
+        Write-Host "VCLibs downloaded successfully" -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to download VCLibs: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
+    
+    Write-Host "Downloading UI.Xaml..." -ForegroundColor Cyan
+    try {
+        Invoke-WebRequest -Uri $uiXamlUrl -OutFile "$DownloadPath\UIXaml.appx" -UseBasicParsing
+        Write-Host "UI.Xaml downloaded successfully" -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to download UI.Xaml: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
+    
+    Write-Host "Downloading winget..." -ForegroundColor Cyan
+    try {
+        Invoke-WebRequest -Uri $wingetUrl -OutFile "$DownloadPath\winget.msixbundle" -UseBasicParsing
+        Write-Host "winget downloaded successfully" -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to download winget: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
+    
+    Write-Host "All winget dependencies downloaded successfully!" -ForegroundColor Green
+}
+
+# Create the DNS configuration script content (modified to use pre-downloaded files)
 $dnsScript = @'
 # Set DNS servers for primary network adapter (Windows Sandbox compatible)
 # Primary DNS: 1.1.1.1 (Cloudflare)
@@ -117,55 +167,34 @@ Start-Sleep -Seconds 3
 
 Write-LogHost "`n=== Installing winget (Windows Package Manager) ===" "Magenta"
 
-# Function to install winget and its dependencies
-function Install-Winget {
+# Function to install winget from pre-downloaded files
+function Install-WingetFromLocal {
     try {
-        Write-LogHost "Installing winget and dependencies..." "Yellow"
+        Write-LogHost "Installing winget from pre-downloaded files..." "Yellow"
         
-        # Create temp directory for downloads
-        $tempDir = "$env:TEMP\WingetInstall"
-        if (!(Test-Path $tempDir)) {
-            New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-            Write-LogHost "Created temp directory: $tempDir" "Cyan"
+        # Path to pre-downloaded files in sandbox
+        $wingetFilesPath = "C:\Users\WDAGUtilityAccount\Desktop\SandboxFiles\WingetDependencies"
+        
+        if (!(Test-Path $wingetFilesPath)) {
+            Write-LogError "Winget dependencies folder not found: $wingetFilesPath"
+            throw "Winget dependencies not available"
         }
         
-        # Download URLs (latest stable versions)
-        $vcLibsUrl = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"
-        $uiXamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"
-        $wingetUrl = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-        
-        # Download dependencies
-        Write-LogHost "Downloading Visual C++ Redistributable Libraries..." "Cyan"
-        try {
-            Invoke-WebRequest -Uri $vcLibsUrl -OutFile "$tempDir\VCLibs.appx" -UseBasicParsing
-            Write-LogHost "VCLibs downloaded successfully" "Green"
-        } catch {
-            Write-LogError "Failed to download VCLibs" $_
-            throw
-        }
-        
-        Write-LogHost "Downloading UI.Xaml..." "Cyan"
-        try {
-            Invoke-WebRequest -Uri $uiXamlUrl -OutFile "$tempDir\UIXaml.appx" -UseBasicParsing
-            Write-LogHost "UI.Xaml downloaded successfully" "Green"
-        } catch {
-            Write-LogError "Failed to download UI.Xaml" $_
-            throw
-        }
-        
-        Write-LogHost "Downloading winget..." "Cyan"
-        try {
-            Invoke-WebRequest -Uri $wingetUrl -OutFile "$tempDir\winget.msixbundle" -UseBasicParsing
-            Write-LogHost "winget downloaded successfully" "Green"
-        } catch {
-            Write-LogError "Failed to download winget" $_
-            throw
+        # Check if all required files exist
+        $requiredFiles = @("VCLibs.appx", "UIXaml.appx", "winget.msixbundle")
+        foreach ($file in $requiredFiles) {
+            $filePath = Join-Path $wingetFilesPath $file
+            if (!(Test-Path $filePath)) {
+                Write-LogError "Required file not found: $filePath"
+                throw "Missing required file: $file"
+            }
+            Write-LogHost "Found required file: $file" "Green"
         }
         
         # Install dependencies first
         Write-LogHost "Installing Visual C++ Redistributable Libraries..." "Green"
         try {
-            Add-AppxPackage -Path "$tempDir\VCLibs.appx" -ErrorAction SilentlyContinue
+            Add-AppxPackage -Path "$wingetFilesPath\VCLibs.appx" -ErrorAction SilentlyContinue
             Write-LogHost "VCLibs installed successfully" "Green"
         } catch {
             Write-LogError "Failed to install VCLibs" $_
@@ -173,7 +202,7 @@ function Install-Winget {
         
         Write-LogHost "Installing UI.Xaml..." "Green"
         try {
-            Add-AppxPackage -Path "$tempDir\UIXaml.appx" -ErrorAction SilentlyContinue
+            Add-AppxPackage -Path "$wingetFilesPath\UIXaml.appx" -ErrorAction SilentlyContinue
             Write-LogHost "UI.Xaml installed successfully" "Green"
         } catch {
             Write-LogError "Failed to install UI.Xaml" $_
@@ -182,7 +211,7 @@ function Install-Winget {
         # Install winget
         Write-LogHost "Installing winget..." "Green"
         try {
-            Add-AppxPackage -Path "$tempDir\winget.msixbundle" -ErrorAction SilentlyContinue
+            Add-AppxPackage -Path "$wingetFilesPath\winget.msixbundle" -ErrorAction SilentlyContinue
             Write-LogHost "winget package installed successfully" "Green"
         } catch {
             Write-LogError "Failed to install winget package" $_
@@ -226,22 +255,14 @@ function Install-Winget {
             Write-LogHost "winget installation may not be complete. Try running 'winget' from command prompt." "Yellow"
         }
         
-        # Clean up temp files
-        try {
-            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-            Write-LogHost "Cleaned up temp directory" "Cyan"
-        } catch {
-            Write-LogError "Failed to clean up temp directory" $_
-        }
-        
     } catch {
-        Write-LogError "Error installing winget" $_
+        Write-LogError "Error installing winget from local files" $_
         Write-LogHost "You may need to install winget manually from the Microsoft Store or GitHub releases." "Yellow"
     }
 }
 
-# Install winget
-Install-Winget
+# Install winget from pre-downloaded files
+Install-WingetFromLocal
 
 Write-LogHost "`n=== Setup Complete ===" "Green"
 Write-LogHost "DNS configured and winget installed!" "Green"
@@ -296,6 +317,16 @@ if (!(Test-Path $oneDriveScriptsDir)) {
     New-Item -ItemType Directory -Path $oneDriveScriptsDir -Force | Out-Null
 }
 
+# Download winget dependencies to local folder
+$wingetDependenciesPath = "$scriptsDir\WingetDependencies"
+Write-Host "`nDownloading winget dependencies..." -ForegroundColor Green
+try {
+    Download-WingetDependencies -DownloadPath $wingetDependenciesPath
+} catch {
+    Write-Host "Failed to download winget dependencies: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Continuing without winget installation..." -ForegroundColor Yellow
+}
+
 # Save the DNS script to both C: drive (primary) and OneDrive (backup)
 $dnsScriptPath = "$scriptsDir\SetDNS_and_Winget.ps1"
 $dnsScript | Out-File -FilePath $dnsScriptPath -Encoding UTF8 -Force
@@ -345,6 +376,7 @@ Write-Host "DNS + winget script (OneDrive backup): $oneDriveDnsScriptPath" -Fore
 Write-Host "Batch file (C: drive): $batchPath" -ForegroundColor Yellow
 Write-Host "Batch file (OneDrive backup): $oneDriveBatchPath" -ForegroundColor Yellow
 Write-Host "Sandbox config: $configPath" -ForegroundColor Yellow
+Write-Host "Winget dependencies: $wingetDependenciesPath" -ForegroundColor Yellow
 
 # Check if Windows Sandbox is available
 if (!(Get-WindowsOptionalFeature -Online -FeatureName "Containers-DisposableClientVM" | Where-Object {$_.State -eq "Enabled"})) {
@@ -358,7 +390,7 @@ if (!(Get-WindowsOptionalFeature -Online -FeatureName "Containers-DisposableClie
 
 # Launch Windows Sandbox
 Write-Host "`nLaunching Windows Sandbox with DNS auto-configuration and winget installation..." -ForegroundColor Green
-Write-Host "The DNS script will run automatically when the sandbox starts, followed by winget installation." -ForegroundColor Cyan
+Write-Host "The DNS script will run automatically when the sandbox starts, followed by winget installation from pre-downloaded files." -ForegroundColor Cyan
 Write-Host "You can reuse the .wsb file later: $configPath" -ForegroundColor Cyan
 
 try {
@@ -371,4 +403,5 @@ try {
 Write-Host "`nSandbox session ended." -ForegroundColor Yellow
 Write-Host "Files saved to C: drive: $scriptsDir" -ForegroundColor Green
 Write-Host "Backup files saved to OneDrive: $oneDriveScriptsDir" -ForegroundColor Green
+Write-Host "Winget dependencies saved to: $wingetDependenciesPath" -ForegroundColor Green
 Write-Host "Done!" -ForegroundColor Green
