@@ -15,19 +15,34 @@ function Download-WingetDependencies {
         Write-Host "Created download directory: $DownloadPath" -ForegroundColor Cyan
     }
     
-    # Download URLs (latest stable versions)
-    $vcLibsUrl = "https://aka.ms/Microsoft.VCLibs.arm64.14.00.Desktop.appx"
+    # Download URLs (latest stable versions) - Note: VCLibs no longer downloaded due to no direct link availability
     $uiXamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.arm64.appx"
     $wingetUrl = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
     
-    # Download dependencies
-    Write-Host "Downloading Visual C++ Redistributable Libraries..." -ForegroundColor Cyan
-    try {
-        Invoke-WebRequest -Uri $vcLibsUrl -OutFile "$DownloadPath\VCLibs.appx" -UseBasicParsing
-        Write-Host "VCLibs downloaded successfully" -ForegroundColor Green
-    } catch {
-        Write-Host "Failed to download VCLibs: $($_.Exception.Message)" -ForegroundColor Red
-        throw
+    # Get VCLibs - check dependency directory first, then Kris's OneDrive directory, or prompt user
+    Write-Host "Checking for Visual C++ Redistributable Libraries..." -ForegroundColor Cyan
+    $vcLibsPath = "$DownloadPath\VCLibs.appx"
+    $krisPenningtonPath = "C:\Users\KrisPennington\OneDrive - Newwave Cloud Consulting\Documents\VCLibs.appx"
+    
+    if (Test-Path $vcLibsPath) {
+        Write-Host "VCLibs already exists in dependency directory" -ForegroundColor Green
+    } elseif (Test-Path $krisPenningtonPath) {
+        Write-Host "VCLibs found in Kris Pennington's OneDrive directory, copying to dependency directory..." -ForegroundColor Yellow
+        try {
+            Copy-Item -Path $krisPenningtonPath -Destination $vcLibsPath -Force
+            Write-Host "VCLibs copied successfully from OneDrive directory" -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to copy VCLibs from OneDrive directory: $($_.Exception.Message)" -ForegroundColor Red
+            throw
+        }
+    } else {
+        Write-Host "VCLibs not found in dependency directory or Kris Pennington's OneDrive directory." -ForegroundColor Red
+        Write-Host "Please manually download VCLibs.appx file or contact Kris Pennington for the file." -ForegroundColor Yellow
+        Write-Host "Expected locations checked:" -ForegroundColor Yellow
+        Write-Host "  - Dependency directory: $vcLibsPath" -ForegroundColor White
+        Write-Host "  - Kris Pennington OneDrive: $krisPenningtonPath" -ForegroundColor White
+        Write-Host "Note: There is no direct download link available for this file from Microsoft or GitHub." -ForegroundColor Cyan
+        throw "VCLibs.appx file not found in expected locations"
     }
     
     Write-Host "Downloading UI.Xaml..." -ForegroundColor Cyan
