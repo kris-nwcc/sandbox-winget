@@ -1,6 +1,169 @@
 # Launch Windows Sandbox with automatic DNS configuration and winget installation
 # This script creates a sandbox configuration file and launches it
 
+# Function to download winget dependencies using BITS
+function Download-WingetDependencies-BITS {
+    param(
+        [string]$DownloadPath
+    )
+    
+    Write-Host "Downloading winget dependencies using BITS to: $DownloadPath" -ForegroundColor Green
+    
+    # Create download directory if it doesn't exist
+    if (!(Test-Path $DownloadPath)) {
+        New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
+        Write-Host "Created download directory: $DownloadPath" -ForegroundColor Cyan
+    }
+    
+    # Check if BITS service is running
+    $bitsService = Get-Service -Name "BITS" -ErrorAction SilentlyContinue
+    if (-not $bitsService -or $bitsService.Status -ne "Running") {
+        Write-Host "BITS service is not running. Starting BITS service..." -ForegroundColor Yellow
+        try {
+            Start-Service -Name "BITS" -ErrorAction Stop
+            Write-Host "BITS service started successfully" -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to start BITS service: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "Falling back to Invoke-WebRequest..." -ForegroundColor Yellow
+            Download-WingetDependencies -DownloadPath $DownloadPath
+            return
+        }
+    }
+    
+    # Download URLs (latest stable versions)
+    $downloads = @(
+        @{
+            Name = "Visual C++ Redistributable Libraries"
+            Url = "https://aka.ms/Microsoft.VCLibs.arm64.14.00.Desktop.appx"
+            FileName = "VCLibs.appx"
+        },
+        @{
+            Name = "UI.Xaml"
+            Url = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.arm64.appx"
+            FileName = "UIXaml.appx"
+        },
+        @{
+            Name = "winget"
+            Url = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+            FileName = "winget.msixbundle"
+        }
+    )
+    
+    $jobs = @()
+    
+    # Start all downloads
+    foreach ($download in $downloads) {
+        $destinationPath = Join-Path $DownloadPath $download.FileName
+        
+        Write-Host "Starting BITS download for $($download.Name)..." -ForegroundColor Cyan
+        
+        try {
+            # Remove existing file if it exists
+            if (Test-Path $destinationPath) {
+                Remove-Item $destinationPath -Force
+            }
+            
+            # Start BITS transfer
+            $job = Start-BitsTransfer -Source $download.Url -Destination $destinationPath -Priority Foreground -Asynchronous
+            $jobs += @{
+                Job = $job
+                Name = $download.Name
+                FileName = $download.FileName
+            }
+            
+            Write-Host "BITS job started for $($download.Name) (Job ID: $($job.JobId))" -ForegroundColor Green
+            
+        } catch {
+            Write-Host "Failed to start BITS download for $($download.Name): $($_.Exception.Message)" -ForegroundColor Red
+            
+            # Fallback to Invoke-WebRequest for this file
+            Write-Host "Falling back to Invoke-WebRequest for $($download.Name)..." -ForegroundColor Yellow
+            try {
+                Invoke-WebRequest -Uri $download.Url -OutFile $destinationPath -UseBasicParsing
+                Write-Host "$($download.Name) downloaded successfully using fallback method" -ForegroundColor Green
+            } catch {
+                Write-Host "Fallback download also failed for $($download.Name): $($_.Exception.Message)" -ForegroundColor Red
+                throw
+            }
+        }
+    }
+    
+    # Monitor and wait for all BITS jobs to complete
+    if ($jobs.Count -gt 0) {
+        Write-Host "`nMonitoring BITS downloads..." -ForegroundColor Yellow
+        
+        $completedJobs = 0
+        $totalJobs = $jobs.Count
+        
+        do {
+            Start-Sleep -Seconds 2
+            $stillRunning = $false
+            
+            foreach ($jobInfo in $jobs) {
+                $job = Get-BitsTransfer -JobId $jobInfo.Job.JobId -ErrorAction SilentlyContinue
+                
+                if ($job) {
+                    switch ($job.JobState) {
+                        "Transferred" {
+                            Write-Host "Completing download for $($jobInfo.Name)..." -ForegroundColor Cyan
+                            try {
+                                Complete-BitsTransfer -BitsJob $job
+                                Write-Host "$($jobInfo.Name) downloaded successfully" -ForegroundColor Green
+                                $completedJobs++
+                            } catch {
+                                Write-Host "Failed to complete BITS transfer for $($jobInfo.Name): $($_.Exception.Message)" -ForegroundColor Red
+                                Remove-BitsTransfer -BitsJob $job
+                                throw
+                            }
+                        }
+                        "Transferring" {
+                            $stillRunning = $true
+                            $progress = [math]::Round(($job.BytesTransferred / $job.BytesTotal) * 100, 1)
+                            Write-Host "Downloading $($jobInfo.Name): $progress%" -ForegroundColor Yellow
+                        }
+                        "Error" {
+                            Write-Host "BITS transfer failed for $($jobInfo.Name): $($job.ErrorDescription)" -ForegroundColor Red
+                            Remove-BitsTransfer -BitsJob $job
+                            throw "BITS transfer failed for $($jobInfo.Name)"
+                        }
+                        "Cancelled" {
+                            Write-Host "BITS transfer was cancelled for $($jobInfo.Name)" -ForegroundColor Red
+                            Remove-BitsTransfer -BitsJob $job
+                            throw "BITS transfer was cancelled for $($jobInfo.Name)"
+                        }
+                        default {
+                            $stillRunning = $true
+                        }
+                    }
+                }
+            }
+            
+            # Remove completed jobs from monitoring list
+            $jobs = $jobs | Where-Object { 
+                $job = Get-BitsTransfer -JobId $_.Job.JobId -ErrorAction SilentlyContinue
+                $job -and $job.JobState -notin @("Transferred", "Error", "Cancelled")
+            }
+            
+        } while ($stillRunning -and $jobs.Count -gt 0)
+        
+        Write-Host "`nAll BITS downloads completed!" -ForegroundColor Green
+    }
+    
+    # Verify all files were downloaded
+    foreach ($download in $downloads) {
+        $filePath = Join-Path $DownloadPath $download.FileName
+        if (Test-Path $filePath) {
+            $fileSize = (Get-Item $filePath).Length
+            Write-Host "✓ $($download.Name): $([math]::Round($fileSize / 1MB, 2)) MB" -ForegroundColor Green
+        } else {
+            Write-Host "✗ $($download.Name): File not found" -ForegroundColor Red
+            throw "Download verification failed for $($download.Name)"
+        }
+    }
+    
+    Write-Host "All winget dependencies downloaded successfully using BITS!" -ForegroundColor Green
+}
+
 # Function to download winget dependencies
 function Download-WingetDependencies {
     param(
@@ -321,7 +484,8 @@ if (!(Test-Path $oneDriveScriptsDir)) {
 $wingetDependenciesPath = "$scriptsDir\WingetDependencies"
 Write-Host "`nDownloading winget dependencies..." -ForegroundColor Green
 try {
-    Download-WingetDependencies -DownloadPath $wingetDependenciesPath
+    # Use BITS for downloading (change to Download-WingetDependencies for standard method)
+    Download-WingetDependencies-BITS -DownloadPath $wingetDependenciesPath
 } catch {
     Write-Host "Failed to download winget dependencies: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Continuing without winget installation..." -ForegroundColor Yellow
