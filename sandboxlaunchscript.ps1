@@ -45,21 +45,128 @@ function Download-WingetDependencies {
         throw "VCLibs.appx file not found in expected locations"
     }
     
-    Write-Host "Downloading UI.Xaml..." -ForegroundColor Cyan
+    # Function to download file using BITS with proper error handling
+    function Download-FileWithBits {
+        param(
+            [string]$Url,
+            [string]$OutFile,
+            [string]$DisplayName
+        )
+        
+        Write-Host "Downloading $DisplayName..." -ForegroundColor Cyan
+        
+        try {
+            # Create BITS job
+            $jobName = "Download_$DisplayName"
+            $bitsJob = Start-BitsTransfer -Source $Url -Destination $OutFile -DisplayName $jobName -Asynchronous
+            
+            # Monitor the job with proper error handling
+            $maxWaitTime = 300  # 5 minutes timeout
+            $startTime = Get-Date
+            $lastStatus = $null
+            
+            do {
+                Start-Sleep -Seconds 2
+                
+                # Get current job status
+                $currentJob = Get-BitsTransfer -Name $jobName -ErrorAction SilentlyContinue
+                
+                if ($currentJob -eq $null) {
+                    # Job was removed - check if file exists and has content
+                    if (Test-Path $OutFile) {
+                        $fileInfo = Get-Item $OutFile
+                        if ($fileInfo.Length -gt 0) {
+                            Write-Host "$DisplayName downloaded successfully" -ForegroundColor Green
+                            return $true
+                        } else {
+                            throw "Download completed but file is empty"
+                        }
+                    } else {
+                        throw "Download job was removed and file not found"
+                    }
+                }
+                
+                $currentStatus = $currentJob.JobState
+                
+                # Show progress if status changed
+                if ($currentStatus -ne $lastStatus) {
+                    switch ($currentStatus) {
+                        "Connecting" { Write-Host "  Connecting to server..." -ForegroundColor Yellow }
+                        "Transferring" { 
+                            $progress = $currentJob.BytesTransferred
+                            $total = $currentJob.BytesTotal
+                            if ($total -gt 0) {
+                                $percent = [math]::Round(($progress / $total) * 100, 1)
+                                Write-Host "  Transferring: $percent% ($progress / $total bytes)" -ForegroundColor Yellow
+                            } else {
+                                Write-Host "  Transferring..." -ForegroundColor Yellow
+                            }
+                        }
+                        "Transferred" { Write-Host "  Transfer completed, finalizing..." -ForegroundColor Yellow }
+                        "Suspended" { Write-Host "  Transfer suspended" -ForegroundColor Yellow }
+                        "Error" { 
+                            $errorDesc = $currentJob.ErrorDescription
+                            throw "Transfer failed: $errorDesc"
+                        }
+                        "Cancelled" { throw "Transfer was cancelled" }
+                    }
+                    $lastStatus = $currentStatus
+                }
+                
+                # Check timeout
+                if ((Get-Date) - $startTime).TotalSeconds -gt $maxWaitTime) {
+                    # Suspend and remove the job
+                    Suspend-BitsTransfer -Name $jobName -ErrorAction SilentlyContinue
+                    Remove-BitsTransfer -Name $jobName -ErrorAction SilentlyContinue
+                    throw "Download timed out after $maxWaitTime seconds"
+                }
+                
+            } while ($currentStatus -in @("Connecting", "Transferring", "Transferred"))
+            
+            # Complete the transfer
+            Complete-BitsTransfer -Name $jobName
+            
+            # Verify the file was downloaded successfully
+            if (Test-Path $OutFile) {
+                $fileInfo = Get-Item $OutFile
+                if ($fileInfo.Length -gt 0) {
+                    Write-Host "$DisplayName downloaded successfully" -ForegroundColor Green
+                    return $true
+                } else {
+                    throw "Download completed but file is empty"
+                }
+            } else {
+                throw "Download completed but file not found"
+            }
+            
+        } catch {
+            # Clean up any remaining BITS job
+            try {
+                $existingJob = Get-BitsTransfer -Name $jobName -ErrorAction SilentlyContinue
+                if ($existingJob) {
+                    Suspend-BitsTransfer -Name $jobName -ErrorAction SilentlyContinue
+                    Remove-BitsTransfer -Name $jobName -ErrorAction SilentlyContinue
+                }
+            } catch {
+                # Ignore cleanup errors
+            }
+            
+            Write-Host "Failed to download $DisplayName`: $($_.Exception.Message)" -ForegroundColor Red
+            throw
+        }
+    }
+    
+    # Download UI.Xaml using BITS
     try {
-        Invoke-WebRequest -Uri $uiXamlUrl -OutFile "$DownloadPath\UIXaml.appx" -UseBasicParsing
-        Write-Host "UI.Xaml downloaded successfully" -ForegroundColor Green
+        Download-FileWithBits -Url $uiXamlUrl -OutFile "$DownloadPath\UIXaml.appx" -DisplayName "UI.Xaml"
     } catch {
-        Write-Host "Failed to download UI.Xaml: $($_.Exception.Message)" -ForegroundColor Red
         throw
     }
     
-    Write-Host "Downloading winget..." -ForegroundColor Cyan
+    # Download winget using BITS
     try {
-        Invoke-WebRequest -Uri $wingetUrl -OutFile "$DownloadPath\winget.msixbundle" -UseBasicParsing
-        Write-Host "winget downloaded successfully" -ForegroundColor Green
+        Download-FileWithBits -Url $wingetUrl -OutFile "$DownloadPath\winget.msixbundle" -DisplayName "winget"
     } catch {
-        Write-Host "Failed to download winget: $($_.Exception.Message)" -ForegroundColor Red
         throw
     }
     
