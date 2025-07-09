@@ -1,6 +1,26 @@
 # Launch Windows Sandbox with automatic DNS configuration and winget installation
 # This script creates a sandbox configuration file and launches it
 
+# Check if script is running with administrative privileges
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+
+if (-not $isAdmin) {
+    Write-Host "This script requires administrative privileges to run properly." -ForegroundColor Red
+    Write-Host "`nSince you are not running as administrator, please follow these manual steps:" -ForegroundColor Yellow
+    Write-Host "`n1. Manually copy the file 'SandboxWithDNS_and_Winget.wsb' from:" -ForegroundColor Cyan
+    Write-Host "   C:\SandboxScripts\SandboxWithDNS_and_Winget.wsb" -ForegroundColor White
+    Write-Host "`n2. Copy it to:" -ForegroundColor Cyan
+    Write-Host "   C:\Users\$env:USERNAME\OneDrive - [Your Company Name]\Documents\SandboxScripts\SandboxWithDNS_and_Winget.wsb" -ForegroundColor White
+    Write-Host "`n3. You do not need to run this script again." -ForegroundColor Green
+    Write-Host "   Simply create a shortcut to the .wsb file on your desktop and run the shortcut in the future when you need to open the sandbox." -ForegroundColor Green
+    Write-Host "`nNote: Replace '[Your Company Name]' with your actual company name in the OneDrive path." -ForegroundColor Yellow
+    Write-Host "`nPress any key to exit..." -ForegroundColor Cyan
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit
+}
+
+Write-Host "Running with administrative privileges. Proceeding with sandbox setup..." -ForegroundColor Green
+
 # Function to download winget dependencies
 function Download-WingetDependencies {
     param(
