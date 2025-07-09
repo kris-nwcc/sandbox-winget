@@ -1,0 +1,374 @@
+# Launch Windows Sandbox with automatic DNS configuration and winget installation
+# This script creates a sandbox configuration file and launches it
+
+# Create the DNS configuration script content
+$dnsScript = @'
+# Set DNS servers for primary network adapter (Windows Sandbox compatible)
+# Primary DNS: 1.1.1.1 (Cloudflare)
+# Secondary DNS: 8.8.8.8 (Google)
+
+# Set up logging
+$logFile = "C:\Users\WDAGUtilityAccount\Desktop\SandboxFiles\sandbox_setup.log"
+$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+# Function to write to both console and log file
+function Write-LogHost {
+    param(
+        [string]$Message,
+        [string]$ForegroundColor = "White",
+        [string]$LogLevel = "INFO"
+    )
+    
+    $logEntry = "[$timestamp] [$LogLevel] $Message"
+    Write-Host $Message -ForegroundColor $ForegroundColor
+    Add-Content -Path $logFile -Value $logEntry -Encoding UTF8
+}
+
+# Function to write error to log
+function Write-LogError {
+    param(
+        [string]$Message,
+        [System.Management.Automation.ErrorRecord]$ErrorRecord = $null
+    )
+    
+    $logEntry = "[$timestamp] [ERROR] $Message"
+    if ($ErrorRecord) {
+        $logEntry += " - Exception: $($ErrorRecord.Exception.Message)"
+        $logEntry += " - StackTrace: $($ErrorRecord.ScriptStackTrace)"
+    }
+    
+    Write-Host $Message -ForegroundColor Red
+    Add-Content -Path $logFile -Value $logEntry -Encoding UTF8
+}
+
+# Initialize log file
+"=== Windows Sandbox Setup Log ===" | Out-File -FilePath $logFile -Encoding UTF8
+"Session started at: $timestamp" | Add-Content -Path $logFile -Encoding UTF8
+"=============================================" | Add-Content -Path $logFile -Encoding UTF8
+
+Write-LogHost "Setting DNS servers for Windows Sandbox..." "Green"
+
+# Method 1: Using netsh (most reliable in sandbox)
+Write-LogHost "Attempting to set DNS using netsh..." "Yellow"
+
+# Get active network interface name using WMI
+try {
+    $networkAdapters = Get-WmiObject -Class Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true -and $_.DefaultIPGateway -ne $null }
+    
+    if ($networkAdapters) {
+        $adapter = $networkAdapters | Select-Object -First 1
+        $interfaceName = $adapter.Description
+        
+        Write-LogHost "Found active adapter: $interfaceName" "Green"
+        
+        # Set DNS servers using netsh
+        $result1 = netsh interface ip set dns name="$interfaceName" static 1.1.1.1
+        $result2 = netsh interface ip add dns name="$interfaceName" 8.8.8.8 index=2
+        
+        Write-LogHost "Primary DNS set: $result1" "Cyan"
+        Write-LogHost "Secondary DNS set: $result2" "Cyan"
+        
+        # Verify using ipconfig
+        Write-LogHost "`nCurrent DNS configuration:" "Yellow"
+        $dnsInfo = ipconfig /all | Select-String "DNS Servers"
+        Write-LogHost $dnsInfo "White"
+        
+    } else {
+        Write-LogError "No active network adapter found via WMI."
+    }
+    
+} catch {
+    Write-LogError "WMI method failed" $_
+    
+    # Fallback: Try setting DNS for all interfaces
+    Write-LogHost "Trying fallback method for all interfaces..." "Yellow"
+    
+    try {
+        # Get interface names from netsh
+        $interfaces = netsh interface show interface | Select-String "Connected" | ForEach-Object { ($_ -split '\s+')[3] }
+        
+        foreach ($interface in $interfaces) {
+            if ($interface -and $interface.Trim() -ne "") {
+                Write-LogHost "Setting DNS for interface: $interface" "Cyan"
+                $result1 = netsh interface ip set dns name="$interface" static 1.1.1.1
+                $result2 = netsh interface ip add dns name="$interface" 8.8.8.8 index=2
+                Write-LogHost "DNS set for $interface - Primary: $result1, Secondary: $result2" "Cyan"
+            }
+        }
+    } catch {
+        Write-LogError "Fallback DNS method also failed" $_
+    }
+}
+
+# Flush DNS cache
+Write-LogHost "`nFlushing DNS cache..." "Yellow"
+try {
+    $flushResult = ipconfig /flushdns
+    Write-LogHost "DNS cache flushed successfully" "Green"
+} catch {
+    Write-LogError "Failed to flush DNS cache" $_
+}
+
+Write-LogHost "`nDNS configuration complete!" "Green"
+
+# Wait a moment for DNS to propagate
+Write-LogHost "Waiting for DNS to propagate..." "Yellow"
+Start-Sleep -Seconds 3
+
+Write-LogHost "`n=== Installing winget (Windows Package Manager) ===" "Magenta"
+
+# Function to install winget and its dependencies
+function Install-Winget {
+    try {
+        Write-LogHost "Installing winget and dependencies..." "Yellow"
+        
+        # Create temp directory for downloads
+        $tempDir = "$env:TEMP\WingetInstall"
+        if (!(Test-Path $tempDir)) {
+            New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+            Write-LogHost "Created temp directory: $tempDir" "Cyan"
+        }
+        
+        # Download URLs (latest stable versions)
+        $vcLibsUrl = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"
+        $uiXamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"
+        $wingetUrl = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+        
+        # Download dependencies
+        Write-LogHost "Downloading Visual C++ Redistributable Libraries..." "Cyan"
+        try {
+            Invoke-WebRequest -Uri $vcLibsUrl -OutFile "$tempDir\VCLibs.appx" -UseBasicParsing
+            Write-LogHost "VCLibs downloaded successfully" "Green"
+        } catch {
+            Write-LogError "Failed to download VCLibs" $_
+            throw
+        }
+        
+        Write-LogHost "Downloading UI.Xaml..." "Cyan"
+        try {
+            Invoke-WebRequest -Uri $uiXamlUrl -OutFile "$tempDir\UIXaml.appx" -UseBasicParsing
+            Write-LogHost "UI.Xaml downloaded successfully" "Green"
+        } catch {
+            Write-LogError "Failed to download UI.Xaml" $_
+            throw
+        }
+        
+        Write-LogHost "Downloading winget..." "Cyan"
+        try {
+            Invoke-WebRequest -Uri $wingetUrl -OutFile "$tempDir\winget.msixbundle" -UseBasicParsing
+            Write-LogHost "winget downloaded successfully" "Green"
+        } catch {
+            Write-LogError "Failed to download winget" $_
+            throw
+        }
+        
+        # Install dependencies first
+        Write-LogHost "Installing Visual C++ Redistributable Libraries..." "Green"
+        try {
+            Add-AppxPackage -Path "$tempDir\VCLibs.appx" -ErrorAction SilentlyContinue
+            Write-LogHost "VCLibs installed successfully" "Green"
+        } catch {
+            Write-LogError "Failed to install VCLibs" $_
+        }
+        
+        Write-LogHost "Installing UI.Xaml..." "Green"
+        try {
+            Add-AppxPackage -Path "$tempDir\UIXaml.appx" -ErrorAction SilentlyContinue
+            Write-LogHost "UI.Xaml installed successfully" "Green"
+        } catch {
+            Write-LogError "Failed to install UI.Xaml" $_
+        }
+        
+        # Install winget
+        Write-LogHost "Installing winget..." "Green"
+        try {
+            Add-AppxPackage -Path "$tempDir\winget.msixbundle" -ErrorAction SilentlyContinue
+            Write-LogHost "winget package installed successfully" "Green"
+        } catch {
+            Write-LogError "Failed to install winget package" $_
+        }
+        
+        # Wait for installation to complete
+        Write-LogHost "Waiting for installation to complete..." "Yellow"
+        Start-Sleep -Seconds 5
+        
+        # Verify installation
+        Write-LogHost "Verifying winget installation..." "Yellow"
+        
+        # Add winget to PATH for current session
+        $wingetPath = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+        if ($env:PATH -notlike "*$wingetPath*") {
+            $env:PATH += ";$wingetPath"
+            Write-LogHost "Added winget to PATH: $wingetPath" "Cyan"
+        }
+        
+        # Test winget
+        $wingetExe = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
+        if (Test-Path $wingetExe) {
+            Write-LogHost "winget installed successfully!" "Green"
+            try {
+                $version = & $wingetExe --version
+                Write-LogHost "winget version: $version" "Green"
+            } catch {
+                Write-LogError "winget executable found but failed to run" $_
+            }
+            
+            # Show some useful commands
+            Write-LogHost "`nUseful winget commands:" "Cyan"
+            Write-LogHost "  winget search <app-name>    - Search for applications" "White"
+            Write-LogHost "  winget install <app-name>   - Install an application" "White"
+            Write-LogHost "  winget list                 - List installed applications" "White"
+            Write-LogHost "  winget upgrade              - List available upgrades" "White"
+            Write-LogHost "  winget upgrade --all        - Upgrade all applications" "White"
+            
+        } else {
+            Write-LogError "winget executable not found at expected location: $wingetExe"
+            Write-LogHost "winget installation may not be complete. Try running 'winget' from command prompt." "Yellow"
+        }
+        
+        # Clean up temp files
+        try {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-LogHost "Cleaned up temp directory" "Cyan"
+        } catch {
+            Write-LogError "Failed to clean up temp directory" $_
+        }
+        
+    } catch {
+        Write-LogError "Error installing winget" $_
+        Write-LogHost "You may need to install winget manually from the Microsoft Store or GitHub releases." "Yellow"
+    }
+}
+
+# Install winget
+Install-Winget
+
+Write-LogHost "`n=== Setup Complete ===" "Green"
+Write-LogHost "DNS configured and winget installed!" "Green"
+Write-LogHost "You can now use winget to install applications." "Yellow"
+
+# Log session completion
+$endTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+Add-Content -Path $logFile -Value "=============================================" -Encoding UTF8
+Add-Content -Path $logFile -Value "Session completed at: $endTimestamp" -Encoding UTF8
+Add-Content -Path $logFile -Value "Log file location: $logFile" -Encoding UTF8
+
+Write-LogHost "`nLog file saved to: $logFile" "Green"
+
+# Keep the window open
+Write-LogHost "`nPress any key to continue..." "Cyan"
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+'@
+
+# Find OneDrive for Business directory (OneDrive - Company Name) for backup copy
+$oneDriveBusinessDir = $null
+$userProfile = $env:USERPROFILE
+
+# Look for OneDrive - [Company Name] directories
+$oneDriveDirs = Get-ChildItem -Path $userProfile -Directory | Where-Object { $_.Name -match "^OneDrive - " }
+
+if ($oneDriveDirs) {
+    # Use the first OneDrive for Business directory found
+    $oneDriveBusinessDir = $oneDriveDirs[0].FullName
+    Write-Host "Found OneDrive for Business: $oneDriveBusinessDir" -ForegroundColor Green
+} else {
+    # Fallback to regular OneDrive if no business account found
+    $regularOneDrive = "$userProfile\OneDrive"
+    if (Test-Path $regularOneDrive) {
+        $oneDriveBusinessDir = $regularOneDrive
+        Write-Host "Using regular OneDrive: $oneDriveBusinessDir" -ForegroundColor Yellow
+    } else {
+        # Final fallback to Documents folder
+        $oneDriveBusinessDir = "$userProfile\Documents"
+        Write-Host "OneDrive not found, using Documents folder: $oneDriveBusinessDir" -ForegroundColor Red
+    }
+}
+
+# Create permanent directory for sandbox scripts on C: drive (primary location)
+$scriptsDir = "C:\SandboxScripts"
+if (!(Test-Path $scriptsDir)) {
+    New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+}
+
+# Create backup directory in OneDrive for syncing
+$oneDriveScriptsDir = "$oneDriveBusinessDir\Documents\SandboxScripts"
+if (!(Test-Path $oneDriveScriptsDir)) {
+    New-Item -ItemType Directory -Path $oneDriveScriptsDir -Force | Out-Null
+}
+
+# Save the DNS script to both C: drive (primary) and OneDrive (backup)
+$dnsScriptPath = "$scriptsDir\SetDNS_and_Winget.ps1"
+$dnsScript | Out-File -FilePath $dnsScriptPath -Encoding UTF8 -Force
+
+$oneDriveDnsScriptPath = "$oneDriveScriptsDir\SetDNS_and_Winget.ps1"
+$dnsScript | Out-File -FilePath $oneDriveDnsScriptPath -Encoding UTF8 -Force
+
+# Create a batch file in permanent location
+$batchContent = @"
+@echo off
+echo Running DNS configuration and winget installation script...
+powershell.exe -ExecutionPolicy Unrestricted -NoProfile -File "C:\Users\WDAGUtilityAccount\Desktop\SandboxFiles\SetDNS_and_Winget.ps1"
+pause
+"@
+
+$batchPath = "$scriptsDir\RunDNS_and_Winget.bat"
+$batchContent | Out-File -FilePath $batchPath -Encoding ASCII -Force
+
+$oneDriveBatchPath = "$oneDriveScriptsDir\RunDNS_and_Winget.bat"
+$batchContent | Out-File -FilePath $oneDriveBatchPath -Encoding ASCII -Force
+
+# Create the Windows Sandbox configuration file
+$sandboxConfig = @"
+<Configuration>
+    <VGpu>Enable</VGpu>
+    <Networking>Enable</Networking>
+    <MappedFolders>
+        <MappedFolder>
+            <HostFolder>$scriptsDir</HostFolder>
+            <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\SandboxFiles</SandboxFolder>
+            <ReadOnly>false</ReadOnly>
+        </MappedFolder>
+    </MappedFolders>
+    <LogonCommand>
+  <Command>powershell.exe -NoExit -ExecutionPolicy Unrestricted -File "C:\Users\WDAGUtilityAccount\Desktop\SandboxFiles\SetDNS_and_Winget.ps1"</Command>
+    </LogonCommand>
+</Configuration>
+"@
+
+# Save the sandbox configuration to permanent location
+$configPath = "$scriptsDir\SandboxWithDNS_and_Winget.wsb"
+$sandboxConfig | Out-File -FilePath $configPath -Encoding UTF8 -Force
+
+Write-Host "Created sandbox configuration files:" -ForegroundColor Green
+Write-Host "DNS + winget script (C: drive): $dnsScriptPath" -ForegroundColor Yellow
+Write-Host "DNS + winget script (OneDrive backup): $oneDriveDnsScriptPath" -ForegroundColor Yellow
+Write-Host "Batch file (C: drive): $batchPath" -ForegroundColor Yellow
+Write-Host "Batch file (OneDrive backup): $oneDriveBatchPath" -ForegroundColor Yellow
+Write-Host "Sandbox config: $configPath" -ForegroundColor Yellow
+
+# Check if Windows Sandbox is available
+if (!(Get-WindowsOptionalFeature -Online -FeatureName "Containers-DisposableClientVM" | Where-Object {$_.State -eq "Enabled"})) {
+    Write-Host "Windows Sandbox is not enabled. Please enable it first:" -ForegroundColor Red
+    Write-Host "1. Open 'Turn Windows features on or off'" -ForegroundColor Yellow
+    Write-Host "2. Check 'Windows Sandbox'" -ForegroundColor Yellow
+    Write-Host "3. Restart your computer" -ForegroundColor Yellow
+    Write-Host "4. Run this script again" -ForegroundColor Yellow
+    exit
+}
+
+# Launch Windows Sandbox
+Write-Host "`nLaunching Windows Sandbox with DNS auto-configuration and winget installation..." -ForegroundColor Green
+Write-Host "The DNS script will run automatically when the sandbox starts, followed by winget installation." -ForegroundColor Cyan
+Write-Host "You can reuse the .wsb file later: $configPath" -ForegroundColor Cyan
+
+try {
+    Start-Process -FilePath "C:\Windows\System32\WindowsSandbox.exe" -ArgumentList $configPath -Wait
+} catch {
+    Write-Host "Error launching sandbox: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "You can manually run the sandbox configuration file: $configPath" -ForegroundColor Yellow
+}
+
+Write-Host "`nSandbox session ended." -ForegroundColor Yellow
+Write-Host "Files saved to C: drive: $scriptsDir" -ForegroundColor Green
+Write-Host "Backup files saved to OneDrive: $oneDriveScriptsDir" -ForegroundColor Green
+Write-Host "Done!" -ForegroundColor Green
