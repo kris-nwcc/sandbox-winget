@@ -118,18 +118,25 @@ function Download-WingetDependencies-BITS {
                         }
                         "Transferring" {
                             $stillRunning = $true
-                            $progress = [math]::Round(($job.BytesTransferred / $job.BytesTotal) * 100, 1)
-                            Write-Host "Downloading $($jobInfo.Name): $progress%" -ForegroundColor Yellow
+                            # Handle division by zero when BytesTotal is 0 (e.g., missing Content-Length header)
+                            if ($job.BytesTotal -gt 0) {
+                                $progress = [math]::Round(($job.BytesTransferred / $job.BytesTotal) * 100, 1)
+                                Write-Host "Downloading $($jobInfo.Name): $progress% ($($job.BytesTransferred)/$($job.BytesTotal) bytes)" -ForegroundColor Yellow
+                            } else {
+                                Write-Host "Downloading $($jobInfo.Name): $($job.BytesTransferred) bytes (unknown total size)" -ForegroundColor Yellow
+                            }
                         }
                         "Error" {
                             Write-Host "BITS transfer failed for $($jobInfo.Name): $($job.ErrorDescription)" -ForegroundColor Red
                             Remove-BitsTransfer -BitsJob $job
-                            throw "BITS transfer failed for $($jobInfo.Name)"
+                            # Mark this job as failed but don't throw immediately to allow other jobs to complete
+                            $jobInfo.Failed = $true
                         }
                         "Cancelled" {
                             Write-Host "BITS transfer was cancelled for $($jobInfo.Name)" -ForegroundColor Red
                             Remove-BitsTransfer -BitsJob $job
-                            throw "BITS transfer was cancelled for $($jobInfo.Name)"
+                            # Mark this job as failed but don't throw immediately to allow other jobs to complete
+                            $jobInfo.Failed = $true
                         }
                         default {
                             $stillRunning = $true
@@ -138,13 +145,23 @@ function Download-WingetDependencies-BITS {
                 }
             }
             
-            # Remove completed jobs from monitoring list
+            # Remove completed and failed jobs from monitoring list
             $jobs = $jobs | Where-Object { 
                 $job = Get-BitsTransfer -JobId $_.Job.JobId -ErrorAction SilentlyContinue
-                $job -and $job.JobState -notin @("Transferred", "Error", "Cancelled")
+                $job -and $job.JobState -notin @("Transferred", "Error", "Cancelled") -and $_.Failed -ne $true
             }
             
         } while ($stillRunning -and $jobs.Count -gt 0)
+        
+        # Check for any failed jobs and report them
+        $failedJobs = $jobs | Where-Object { $_.Failed -eq $true }
+        if ($failedJobs.Count -gt 0) {
+            Write-Host "`nSome BITS downloads failed:" -ForegroundColor Red
+            foreach ($failedJob in $failedJobs) {
+                Write-Host "✗ Failed: $($failedJob.Name)" -ForegroundColor Red
+            }
+            throw "One or more BITS transfers failed. Failed downloads: $($failedJobs.Name -join ', ')"
+        }
         
         Write-Host "`nAll BITS downloads completed!" -ForegroundColor Green
     }
