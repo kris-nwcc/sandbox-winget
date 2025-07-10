@@ -1,6 +1,9 @@
 # Launch Windows Sandbox with automatic DNS configuration and winget installation
 # This script creates a sandbox configuration file and launches it
 
+# Check if script is running with administrative privileges
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+
 # Function to download winget dependencies
 function Download-WingetDependencies {
     param(
@@ -427,16 +430,28 @@ if ($oneDriveDirs) {
     }
 }
 
-# Create permanent directory for sandbox scripts on C: drive (primary location)
-$scriptsDir = "C:\SandboxScripts"
+# Determine script directories based on admin status
+if ($isAdmin) {
+    # Admin users can write to C:\SandboxScripts
+    $scriptsDir = "C:\SandboxScripts"
+    Write-Host "Running as administrator - using C:\SandboxScripts for primary storage" -ForegroundColor Green
+} else {
+    # Non-admin users use Documents folder
+    $scriptsDir = "$userProfile\Documents\SandboxScripts"
+    Write-Host "Running as non-administrator - using Documents folder for storage" -ForegroundColor Yellow
+}
+
+# Create primary scripts directory
 if (!(Test-Path $scriptsDir)) {
     New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+    Write-Host "Created primary scripts directory: $scriptsDir" -ForegroundColor Cyan
 }
 
 # Create backup directory in OneDrive for syncing
 $oneDriveScriptsDir = "$oneDriveBusinessDir\Documents\SandboxScripts"
 if (!(Test-Path $oneDriveScriptsDir)) {
     New-Item -ItemType Directory -Path $oneDriveScriptsDir -Force | Out-Null
+    Write-Host "Created OneDrive backup directory: $oneDriveScriptsDir" -ForegroundColor Cyan
 }
 
 # Download winget dependencies to local folder
@@ -488,16 +503,20 @@ $sandboxConfig = @"
 </Configuration>
 "@
 
-# Save the sandbox configuration to permanent location
+# Save the sandbox configuration to both primary location and OneDrive backup
 $configPath = "$scriptsDir\SandboxWithDNS_and_Winget.wsb"
 $sandboxConfig | Out-File -FilePath $configPath -Encoding UTF8 -Force
 
+$oneDriveConfigPath = "$oneDriveScriptsDir\SandboxWithDNS_and_Winget.wsb"
+$sandboxConfig | Out-File -FilePath $oneDriveConfigPath -Encoding UTF8 -Force
+
 Write-Host "Created sandbox configuration files:" -ForegroundColor Green
-Write-Host "DNS + winget script (C: drive): $dnsScriptPath" -ForegroundColor Yellow
+Write-Host "DNS + winget script (primary): $dnsScriptPath" -ForegroundColor Yellow
 Write-Host "DNS + winget script (OneDrive backup): $oneDriveDnsScriptPath" -ForegroundColor Yellow
-Write-Host "Batch file (C: drive): $batchPath" -ForegroundColor Yellow
+Write-Host "Batch file (primary): $batchPath" -ForegroundColor Yellow
 Write-Host "Batch file (OneDrive backup): $oneDriveBatchPath" -ForegroundColor Yellow
-Write-Host "Sandbox config: $configPath" -ForegroundColor Yellow
+Write-Host "Sandbox config (primary): $configPath" -ForegroundColor Yellow
+Write-Host "Sandbox config (OneDrive backup): $oneDriveConfigPath" -ForegroundColor Yellow
 Write-Host "Winget dependencies: $wingetDependenciesPath" -ForegroundColor Yellow
 
 # Check if Windows Sandbox is available
@@ -523,7 +542,30 @@ try {
 }
 
 Write-Host "`nSandbox session ended." -ForegroundColor Yellow
-Write-Host "Files saved to C: drive: $scriptsDir" -ForegroundColor Green
+Write-Host "Files saved to primary location: $scriptsDir" -ForegroundColor Green
 Write-Host "Backup files saved to OneDrive: $oneDriveScriptsDir" -ForegroundColor Green
 Write-Host "Winget dependencies saved to: $wingetDependenciesPath" -ForegroundColor Green
 Write-Host "Done!" -ForegroundColor Green
+
+# Provide instructions based on admin status
+Write-Host "`n" -ForegroundColor White
+
+if (-not $isAdmin) {
+    Write-Host "Running as non-administrator - files have been saved to accessible locations:" -ForegroundColor Yellow
+    Write-Host "`nPrimary location (Documents): $scriptsDir" -ForegroundColor Cyan
+    Write-Host "OneDrive backup: $oneDriveScriptsDir" -ForegroundColor Cyan
+    Write-Host "`nThe .wsb file has been automatically backed up to OneDrive for easy access." -ForegroundColor Green
+    Write-Host "`n" -ForegroundColor White
+} else {
+    Write-Host "Running as administrator - files have been saved to system locations:" -ForegroundColor Green
+    Write-Host "`nPrimary location (C:\SandboxScripts): $scriptsDir" -ForegroundColor Cyan
+    Write-Host "OneDrive backup: $oneDriveScriptsDir" -ForegroundColor Cyan
+    Write-Host "`nThe .wsb file has been automatically backed up to OneDrive for easy access." -ForegroundColor Green
+    Write-Host "`n" -ForegroundColor White
+}
+
+Write-Host "IMPORTANT: You do not need to run this script again." -ForegroundColor Green
+Write-Host "Simply create a shortcut to the .wsb file on your desktop and run the shortcut in the future when you need to open the sandbox." -ForegroundColor Green
+
+Write-Host "`nPress any key to exit..." -ForegroundColor Cyan
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
